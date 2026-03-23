@@ -1,27 +1,28 @@
 # Ray Cluster Experiment (Docker Compose)
 
-This is a standalone Docker Compose Ray cluster under `experiment/ray-cluster/`.
+This repository is a standalone Docker Compose Ray cluster project.
 
-## What you get
+## What You Get
 
-- `ray-head` with Dashboard + Ray Jobs API
-- `ray-worker` nodes (scalable)
-- `make ray up` / `make ray down` workflow
+- `ray-head` with dashboard + Ray Jobs API
+- `ray-worker` nodes (scalable with `N=...`)
+- `make ray ...` workflow for cluster lifecycle and job submission
 - Local Python file submission as a Ray job
 
-## Files
+## Repository Layout
 
 - `docker-compose.yaml` - Ray head/worker stack
-- `.env.example` - Tunable ports/resources
+- `.env.example` - Default ports and resource settings
+- `.env` - Local overrides used by `docker compose --env-file`
 - `Makefile` - `make ray ...` interface
-- `jobs/demo_job.py` - Example Ray job script
+- `jobs/demo_job.py` - Example Ray job (`ray.init(address="auto")`)
+- `jobs/pipeline_job.py` - Pipelined actor example job
 
 ## Usage
 
-Run from `experiment/ray-cluster`:
+Run from the repository root:
 
 ```bash
-cd experiment/ray-cluster
 make ray up
 ```
 
@@ -31,7 +32,7 @@ Scale workers:
 make ray up N=3
 ```
 
-Check cluster:
+Cluster checks:
 
 ```bash
 make ray status
@@ -50,9 +51,9 @@ Stop cluster:
 make ray down
 ```
 
-## Submit a local Python file as a Ray job
+## Submit a Local Python File as a Ray Job
 
-Submit the bundled example:
+Submit the bundled demo:
 
 ```bash
 make ray job FILE=jobs/demo_job.py
@@ -70,7 +71,7 @@ Submit any local file path:
 make ray job FILE=/absolute/path/to/your_job.py
 ```
 
-Notes:
+## Notes
 
 - The script must be executable by Python in the Ray image.
-- If your script uses Ray tasks/actors, initialize with `ray.init(address="auto")`.
+- For cluster-connected scripts, use `ray.init(address="auto")`.
