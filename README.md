@@ -1,26 +1,23 @@
-# Ray Cluster Experiment (Docker Compose)
+# Ray Cluster Experiment
 
-This repository is a standalone Docker Compose Ray cluster project.
+This repository supports Ray cluster runs in two modes:
 
-## What You Get
-
-- `ray-head` with dashboard + Ray Jobs API
-- `ray-worker` nodes (scalable with `N=...`)
-- `make ray ...` workflow for cluster lifecycle and job submission
-- Local Python file submission as a Ray job
+- Docker Compose cluster (`make ray ...`)
+- Slurm cluster (`make slurm ...`)
 
 ## Repository Layout
 
-- `docker-compose.yaml` - Ray head/worker stack
-- `.env.example` - Default ports and resource settings
-- `.env` - Local overrides used by `docker compose --env-file`
-- `Makefile` - `make ray ...` interface
+- `docker-compose.yaml` - Docker Ray head/worker stack
+- `.env.example` - Docker defaults for ports/resources
+- `.env` - Local Docker overrides used by `docker compose --env-file`
+- `Makefile` - Unified interface for Docker and Slurm workflows
+- `scripts/slurm/ray_cluster.sbatch` - Slurm-based Ray head/worker launcher + job runner
 - `jobs/demo_job.py` - Example Ray job (`ray.init(address="auto")`)
 - `jobs/pipeline_job.py` - Pipelined actor example job
 
-## Usage
+## Docker Workflow
 
-Run from the repository root:
+Start cluster:
 
 ```bash
 make ray up
@@ -51,27 +48,53 @@ Stop cluster:
 make ray down
 ```
 
-## Submit a Local Python File as a Ray Job
-
-Submit the bundled demo:
+Submit local file as Ray job:
 
 ```bash
 make ray job FILE=jobs/demo_job.py
-```
-
-Pass script args:
-
-```bash
 make ray job FILE=jobs/demo_job.py ARGS="--count 20"
 ```
 
-Submit any local file path:
+## Slurm Workflow
+
+Update `scripts/slurm/ray_cluster.sbatch` SBATCH directives for your cluster (`--account`, `--nodes`, GPU type, walltime, output).
+
+Allocate/start Slurm job:
 
 ```bash
-make ray job FILE=/absolute/path/to/your_job.py
+make slurm up
 ```
+
+Submit a different script:
+
+```bash
+make slurm up ENTRYPOINT=jobs/pipeline_job.py
+```
+
+Override environment/script settings at submission time:
+
+```bash
+make slurm up \
+  VENV_ACTIVATE=$HOME/src/Verifier_Development/complete_verifier/.venv/bin/activate \
+  PROJECT_ROOT=$PWD \
+  ENTRYPOINT=jobs/demo_job.py \
+  ENTRYPOINT_ARGS="--count 20"
+```
+
+Queue and cancellation:
+
+```bash
+make slurm queue
+make slurm down
+make slurm down JOBID=123456
+```
+
+`scripts/slurm/ray_cluster.sbatch` starts Ray head on the first allocated node, starts workers on remaining nodes, runs the requested Python entrypoint on the head node, and stops Ray processes on exit.
+
+`make slurm up` stores the submitted job id in `.slurm-ray-jobid`; `make slurm down` uses that file by default.
 
 ## Notes
 
-- The script must be executable by Python in the Ray image.
 - For cluster-connected scripts, use `ray.init(address="auto")`.
+- For Docker mode, the script must be executable by Python in the Ray image.
+- `make slurm ...` commands require Slurm CLI tools (`sbatch`, `squeue`, `scancel`) in `PATH` and should be run on your HPC Slurm login node.
