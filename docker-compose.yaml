@@ -1,0 +1,54 @@
+name: ray-cluster-experiment
+
+services:
+  ray-head:
+    image: ${RAY_IMAGE:-rayproject/ray:2.53.0-py311}
+    command: >
+      ray start --head
+      --dashboard-host=0.0.0.0
+      --num-cpus=${RAY_HEAD_CPUS:-0}
+      --object-store-memory=${RAY_HEAD_OBJECT_STORE_MEMORY:-134217728}
+      --port=${RAY_HEAD_PORT:-6379}
+      --ray-client-server-port=${RAY_CLIENT_PORT:-20001}
+      --block
+    ports:
+      - "${RAY_DASHBOARD_PORT:-8265}:8265"
+      - "${RAY_CLIENT_PORT:-20001}:20001"
+      - "${RAY_HEAD_PORT:-6379}:6379"
+    shm_size: ${RAY_HEAD_SHM_SIZE:-1gb}
+    environment:
+      RAY_DISABLE_DOCKER_CPU_WARNING: "1"
+      RAY_memory_usage_threshold: "0.98"
+    volumes:
+      - ./jobs:/opt/ray/jobs:ro
+    healthcheck:
+      test: ["CMD", "ray", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - ray-net
+
+  ray-worker:
+    image: ${RAY_IMAGE:-rayproject/ray:2.53.0-py311}
+    command: >
+      ray start
+      --address=ray-head:${RAY_HEAD_PORT:-6379}
+      --num-cpus=${RAY_WORKER_CPUS:-4}
+      --object-store-memory=${RAY_WORKER_OBJECT_STORE_MEMORY:-1073741824}
+      --block
+    shm_size: ${RAY_WORKER_SHM_SIZE:-2gb}
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    environment:
+      RAY_DISABLE_DOCKER_CPU_WARNING: "1"
+      RAY_memory_usage_threshold: "0.98"
+    restart: unless-stopped
+    networks:
+      - ray-net
+
+networks:
+  ray-net:
+    driver: bridge
