@@ -20,8 +20,16 @@ export SHELL=/bin/bash
 #   ENTRYPOINT_ARGS="--count 20"
 #   RAY_PORT=6379
 #   RAY_DASHBOARD_PORT=8265
-VENV_ACTIVATE="${VENV_ACTIVATE:-$HOME/src/Verifier_Development/complete_verifier/.venv/bin/activate}"
 PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+DEFAULT_VENV_ACTIVATE="$PROJECT_ROOT/.venv/bin/activate"
+LEGACY_VENV_ACTIVATE="$HOME/src/Verifier_Development/complete_verifier/.venv/bin/activate"
+if [[ -n "${VENV_ACTIVATE:-}" ]]; then
+    VENV_ACTIVATE="$VENV_ACTIVATE"
+elif [[ -f "$DEFAULT_VENV_ACTIVATE" ]]; then
+    VENV_ACTIVATE="$DEFAULT_VENV_ACTIVATE"
+else
+    VENV_ACTIVATE="$LEGACY_VENV_ACTIVATE"
+fi
 ENTRYPOINT="${ENTRYPOINT:-jobs/demo_job.py}"
 ENTRYPOINT_ARGS="${ENTRYPOINT_ARGS:-}"
 RAY_PORT="${RAY_PORT:-6379}"
@@ -30,8 +38,14 @@ HEAD_STARTUP_WAIT_SECONDS="${HEAD_STARTUP_WAIT_SECONDS:-30}"
 WORKER_STARTUP_WAIT_SECONDS="${WORKER_STARTUP_WAIT_SECONDS:-10}"
 CLUSTER_STABILIZE_WAIT_SECONDS="${CLUSTER_STABILIZE_WAIT_SECONDS:-10}"
 
+if [[ "$VENV_ACTIVATE" != /* ]]; then
+    VENV_ACTIVATE="$PROJECT_ROOT/$VENV_ACTIVATE"
+fi
+
 if [[ ! -f "$VENV_ACTIVATE" ]]; then
     echo "VENV_ACTIVATE not found: $VENV_ACTIVATE"
+    echo "Checked default project venv: $DEFAULT_VENV_ACTIVATE"
+    echo "Set VENV_ACTIVATE=/path/to/.venv/bin/activate (or .venv/bin/activate relative to PROJECT_ROOT)."
     exit 1
 fi
 
