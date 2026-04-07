@@ -3,7 +3,8 @@
 This repo runs Ray in two modes:
 
 - Docker (`make docker ...`)
-- Slurm (`make slurm ...`)
+- Slurm cluster (`make slurm ...`)
+- Static IP cluster via SSH (`make cluster ...`)
 
 Run `make help` anytime to see commands.
 
@@ -43,6 +44,30 @@ make docker down
 ## 2) Quick Start: Slurm
 
 1. Update Slurm directives in `scripts/slurm/ray_cluster.sbatch`:
+- `conf/cluster_hosts.conf` - IP/host list for static cluster mode
+- `.env.example` - Example configuration values
+- `.env` - Local configuration consumed by `make` targets
+- `Makefile` - Unified interface for Slurm and static-IP workflows
+- `scripts/slurm/ray_cluster.sbatch` - Slurm-based Ray head/worker launcher + job runner
+- `scripts/cluster/ray_cluster_ips.sh` - IP-based Ray head/worker launcher + teardown
+- `jobs/demo_job.py` - Example Ray job (`ray.init(address="auto")`)
+- `jobs/pipeline_job.py` - Pipelined actor example job
+
+## Static IP Workflow
+
+Put node addresses in `conf/cluster_hosts.conf` (first line is head node), then run:
+
+```bash
+make cluster up
+make cluster down
+```
+
+Configure in `.env`:
+
+- `CLUSTER_HOSTS_FILE` (default `conf/cluster_hosts.conf`)
+- `CLUSTER_STATE_FILE` (default `.ray-cluster-hosts`)
+- `CLUSTER_SSH` (default `ssh`)
+- `PROJECT_ROOT`, `VENV_ACTIVATE`, `RAY_PORT`, `RAY_CLIENT_PORT`, `RAY_DASHBOARD_PORT`
 
 - `#SBATCH --account=...`
 - `#SBATCH --nodes=...`
@@ -135,6 +160,8 @@ make docker logs
 ```bash
 make docker status
 ```
+When `SLURM_LOGIN` is set, `make slurm ...` now auto-syncs required project files to `SLURM_REMOTE_DIR` via `tar` over `ssh` before running remote commands. The default sync list is:
+`Makefile scripts/slurm/ray_cluster.sbatch .env`
 
 - Ray internal logs inside containers:
   - Head: `/tmp/ray/session_latest/logs/`
