@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=gts-jyoung9-csse
-#SBATCH --nodes=3
+#SBATCH --nodes=1
 #SBATCH --gpus-per-node=RTX_6000:1
-#SBATCH --time=00:15:00
+#SBATCH --time=01:00:00
 #SBATCH --job-name=ray-poc
 #SBATCH --output=ray-poc-%j.log
 
@@ -20,6 +20,7 @@ export SHELL=/bin/bash
 #   ENTRYPOINT_ARGS="--disable_hugetensor_allocator --batch_size 256 --no_auto_enlarge_batch_size --config /storage/project/r-jyoung9-1/shared/nnv/exp_configs/alpha-beta-CROWN-performance-study/cifar_100.yaml --select_instance 66"
 #   ENTRYPOINT_CMD=abcrown.py --disable_hugetensor_allocator --batch_size 256 --no_auto_enlarge_batch_size --config /storage/project/r-jyoung9-1/shared/nnv/exp_configs/alpha-beta-CROWN-performance-study/cifar_100.yaml --select_instance 66
 #   RAY_PORT=6379
+#   RAY_CLIENT_PORT=20001
 #   RAY_DASHBOARD_PORT=8265
 #   RAY_LOG_ARCHIVE_DIR=logs/ray-slurm
 PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$PWD}}"
@@ -38,6 +39,14 @@ ENTRYPOINT="${ENTRYPOINT:-jobs/demo_job.py}"
 ENTRYPOINT_ARGS="${ENTRYPOINT_ARGS:-}"
 ENTRYPOINT_CMD="${ENTRYPOINT_CMD:-}"
 RAY_PORT="${RAY_PORT:-6379}"
+if [[ -z "${RAY_CLIENT_PORT:-}" ]]; then
+    if [[ "${SLURM_JOB_ID:-}" =~ ^[0-9]+$ ]]; then
+        # Avoid default 10001 collisions when multiple Ray jobs land on a node.
+        RAY_CLIENT_PORT="$((10000 + (SLURM_JOB_ID % 50000)))"
+    else
+        RAY_CLIENT_PORT="10001"
+    fi
+fi
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 RAY_LOG_ARCHIVE_DIR="${RAY_LOG_ARCHIVE_DIR:-$SLURM_LOG_BASE_DIR/logs/ray-slurm/$SLURM_JOB_ID}"
 HEAD_STARTUP_WAIT_SECONDS="${HEAD_STARTUP_WAIT_SECONDS:-30}"
@@ -118,15 +127,34 @@ fi
 
 echo "Head node: $head_node"
 echo "Head IP: $head_ip"
+echo "Ray client port: $RAY_CLIENT_PORT"
 
 declare -a worker_srun_pids=()
+
+print_head_diagnostics() {
+    echo "Collecting Ray head diagnostics from: $head_node"
+    srun --overlap --nodes=1 --ntasks=1 -w "$head_node" bash -lc '
+        log_dir=/tmp/ray/session_latest/logs
+        if [[ ! -d "$log_dir" ]]; then
+            echo "Ray log directory not found: $log_dir"
+            exit 0
+        fi
+        for f in ray_process_exit.log gcs_server.err gcs_server.out raylet.err raylet.out monitor.err monitor.log dashboard.log dashboard.err; do
+            p="$log_dir/$f"
+            if [[ -f "$p" ]]; then
+                echo "===== $p (tail -n 80) ====="
+                tail -n 80 "$p"
+            fi
+        done
+    ' || true
+}
 
 cleanup() {
     if mkdir -p "$RAY_LOG_ARCHIVE_DIR" >/dev/null 2>&1; then
         echo "Collecting Ray worker logs into: $RAY_LOG_ARCHIVE_DIR"
         for node in "${nodes_array[@]}"; do
             node_log_dir="$RAY_LOG_ARCHIVE_DIR/$node"
-            srun --nodes=1 --ntasks=1 -w "$node" env NODE_LOG_DIR="$node_log_dir" \
+            srun --overlap --nodes=1 --ntasks=1 -w "$node" env NODE_LOG_DIR="$node_log_dir" \
                 bash -lc 'mkdir -p "$NODE_LOG_DIR"; if [[ -d /tmp/ray/session_latest/logs ]]; then cp -a /tmp/ray/session_latest/logs/. "$NODE_LOG_DIR"/; else echo "Ray logs not found on node." > "$NODE_LOG_DIR"/NO_LOGS.txt; fi' \
                 >/dev/null 2>&1 || true
         done
@@ -137,7 +165,7 @@ cleanup() {
 
     echo "Stopping Ray processes"
     for node in "${nodes_array[@]}"; do
-        srun --nodes=1 --ntasks=1 -w "$node" \
+        srun --overlap --nodes=1 --ntasks=1 -w "$node" \
             bash -lc "source \"$VENV_ACTIVATE\" && ray stop -f" >/dev/null 2>&1 || true
     done
 
@@ -153,31 +181,58 @@ trap cleanup EXIT
 
 # Start head with dashboard so Ray Jobs API is available.
 srun --nodes=1 --ntasks=1 -w "$head_node" \
-    bash -lc "source \"$VENV_ACTIVATE\" && ray start --head --node-ip-address=\"$head_ip\" --port=\"$RAY_PORT\" --dashboard-host=0.0.0.0 --dashboard-port=\"$RAY_DASHBOARD_PORT\" --block" &
+    bash -lc "source \"$VENV_ACTIVATE\" && ray start --head --node-ip-address=\"$head_ip\" --port=\"$RAY_PORT\" --ray-client-server-port=\"$RAY_CLIENT_PORT\" --dashboard-host=0.0.0.0 --dashboard-port=\"$RAY_DASHBOARD_PORT\" --block" &
 head_srun_pid=$!
 sleep "$HEAD_STARTUP_WAIT_SECONDS"
+
+if ! kill -0 "$head_srun_pid" >/dev/null 2>&1; then
+    echo "Ray head process exited during startup."
+    print_head_diagnostics
+    exit 1
+fi
+
+if ! srun --nodes=1 --ntasks=1 -w "$head_node" \
+    --overlap \
+    bash -lc "source \"$VENV_ACTIVATE\" && ray status --address=\"$head_ip:$RAY_PORT\" >/dev/null 2>&1"; then
+    echo "Ray head is not responding at $head_ip:$RAY_PORT after startup wait."
+    print_head_diagnostics
+    exit 1
+fi
 
 # Start workers.
 worker_num=$((SLURM_JOB_NUM_NODES - 1))
 for ((i = 1; i <= worker_num; i++)); do
     node_i="${nodes_array[$i]}"
     echo "Starting worker $i on $node_i"
-    srun --nodes=1 --ntasks=1 -w "$node_i" \
+    srun --overlap --nodes=1 --ntasks=1 -w "$node_i" \
         bash -lc "source \"$VENV_ACTIVATE\" && ray start --address=\"$head_ip:$RAY_PORT\" --block" &
-    worker_srun_pids+=("$!")
+    worker_pid=$!
+    worker_srun_pids+=("$worker_pid")
     sleep "$WORKER_STARTUP_WAIT_SECONDS"
+
+    if ! kill -0 "$worker_pid" >/dev/null 2>&1; then
+        echo "Ray worker $i on $node_i exited during startup."
+        print_head_diagnostics
+        exit 1
+    fi
 done
 
 sleep "$CLUSTER_STABILIZE_WAIT_SECONDS"
 
+if ! kill -0 "$head_srun_pid" >/dev/null 2>&1; then
+    echo "Ray head exited before entrypoint execution."
+    print_head_diagnostics
+    exit 1
+fi
+
 # Run requested entrypoint on the head node.
 if [[ -n "$ENTRYPOINT_CMD" ]]; then
     echo "Running entrypoint command with uv run: $ENTRYPOINT_CMD"
-    srun --nodes=1 --ntasks=1 -w "$head_node" \
+    srun --overlap --nodes=1 --ntasks=1 -w "$head_node" \
         env VENV_ACTIVATE="$VENV_ACTIVATE" PROJECT_ROOT="$PROJECT_ROOT" UV_BIN="$UV_BIN" ENTRYPOINT_CMD="$ENTRYPOINT_CMD" \
         bash -lc 'source "$VENV_ACTIVATE" && cd "$PROJECT_ROOT" && "$UV_BIN" run bash -lc "$ENTRYPOINT_CMD"'
 else
     echo "Running entrypoint with uv run: $ENTRYPOINT_PATH $ENTRYPOINT_ARGS"
-    srun --nodes=1 --ntasks=1 -w "$head_node" \
+    srun --overlap --nodes=1 --ntasks=1 -w "$head_node" \
         bash -lc "source \"$VENV_ACTIVATE\" && cd \"$PROJECT_ROOT\" && \"$UV_BIN\" run \"$ENTRYPOINT_PATH\" $ENTRYPOINT_ARGS"
 fi

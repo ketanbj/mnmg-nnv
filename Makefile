@@ -1,4 +1,5 @@
 ENV_FILE := .env
+REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # Load local defaults from .env when present.
 -include $(ENV_FILE)
@@ -9,7 +10,6 @@ SLURM_JOB_FILE ?= .slurm-ray-jobid
 SBATCH ?= sbatch
 SCANCEL ?= scancel
 SLURM_SSH ?= ssh
-SLURM_SCP ?= scp
 
 SLURM_LOGIN ?=
 SLURM_REMOTE_DIR ?= $(CURDIR)
@@ -86,30 +86,30 @@ slurm:
 				;; \
 		esac; \
 			if [ "$(SLURM_SYNC)" = "1" ]; then \
-				if ! ( [ -x "$(SLURM_SCP)" ] || command -v "$(SLURM_SCP)" >/dev/null 2>&1 ); then \
-					echo "Error: scp not found (SLURM_SCP=$(SLURM_SCP))."; \
-					echo "Install OpenSSH client or pass SLURM_SCP=/absolute/path/to/scp."; \
+				if ! command -v tar >/dev/null 2>&1; then \
+					echo "Error: tar not found locally."; \
 					exit 127; \
 				fi; \
 				echo "Syncing files to login node: $(SLURM_LOGIN):$(SLURM_REMOTE_DIR)"; \
 				$(SLURM_SSH) "$(SLURM_LOGIN)" "mkdir -p \"$(SLURM_REMOTE_DIR)\""; \
-				SYNCED=0; \
+				if ! $(SLURM_SSH) "$(SLURM_LOGIN)" "command -v tar >/dev/null 2>&1"; then \
+					echo "Error: tar not found on login node."; \
+					exit 127; \
+				fi; \
+				SYNC_LIST=""; \
 				for path in $(SLURM_SYNC_FILES); do \
-					if [ ! -e "$$path" ]; then \
+					if [ ! -e "$(REPO_ROOT)/$$path" ]; then \
 						echo "Warning: sync path not found locally, skipping: $$path"; \
 						continue; \
 					fi; \
-					REMOTE_PARENT=$$(dirname "$$path"); \
-					$(SLURM_SSH) "$(SLURM_LOGIN)" "mkdir -p \"$(SLURM_REMOTE_DIR)/$$REMOTE_PARENT\""; \
-					if [ -d "$$path" ]; then \
-						$(SLURM_SCP) -r "$$path" "$(SLURM_LOGIN):$(SLURM_REMOTE_DIR)/$$REMOTE_PARENT/"; \
-					else \
-						$(SLURM_SCP) "$$path" "$(SLURM_LOGIN):$(SLURM_REMOTE_DIR)/$$REMOTE_PARENT/"; \
-					fi; \
-					SYNCED=1; \
+					SYNC_LIST="$$SYNC_LIST $$path"; \
 				done; \
-				if [ "$$SYNCED" != "1" ]; then \
-					echo "Warning: no sync paths found; skipping scp."; \
+				if [ -z "$$SYNC_LIST" ]; then \
+					echo "Warning: no sync paths found; skipping sync."; \
+				else \
+					echo "Sync list:$$SYNC_LIST"; \
+					( cd "$(REPO_ROOT)" && tar -cf - $$SYNC_LIST ) | \
+						$(SLURM_SSH) "$(SLURM_LOGIN)" "cd \"$(SLURM_REMOTE_DIR)\" && tar -xf -"; \
 				fi; \
 			fi; \
 		JOB_NAME="$(SLURM_JOB_NAME)"; \
@@ -131,6 +131,7 @@ ENTRYPOINT='$(ENTRYPOINT)' \
 ENTRYPOINT_ARGS='$(ENTRYPOINT_ARGS)' \
 ENTRYPOINT_CMD='$(ENTRYPOINT_CMD)' \
 RAY_PORT='$(RAY_PORT)' \
+RAY_CLIENT_PORT='$(RAY_CLIENT_PORT)' \
 RAY_DASHBOARD_PORT='$(RAY_DASHBOARD_PORT)' \
 RAY_LOG_ARCHIVE_DIR='$(RAY_LOG_ARCHIVE_DIR)' \
 HEAD_STARTUP_WAIT_SECONDS='$(HEAD_STARTUP_WAIT_SECONDS)' \
@@ -162,6 +163,7 @@ CLUSTER_STABILIZE_WAIT_SECONDS='$(CLUSTER_STABILIZE_WAIT_SECONDS)' \
 			export ENTRYPOINT_ARGS="$(ENTRYPOINT_ARGS)"; \
 			export ENTRYPOINT_CMD="$(ENTRYPOINT_CMD)"; \
 			export RAY_PORT="$(RAY_PORT)"; \
+			export RAY_CLIENT_PORT="$(RAY_CLIENT_PORT)"; \
 			export RAY_DASHBOARD_PORT="$(RAY_DASHBOARD_PORT)"; \
 			export RAY_LOG_ARCHIVE_DIR="$(RAY_LOG_ARCHIVE_DIR)"; \
 			export HEAD_STARTUP_WAIT_SECONDS="$(HEAD_STARTUP_WAIT_SECONDS)"; \
