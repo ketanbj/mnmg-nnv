@@ -6,7 +6,9 @@ REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 SLURM_SCRIPT ?= scripts/slurm/ray_cluster.sbatch
 SLURM_JOB_FILE ?= .slurm-ray-jobid
+COMPOSE_FILE ?= docker-compose.yaml
 
+DOCKER ?= docker
 SBATCH ?= sbatch
 SCANCEL ?= scancel
 SLURM_SSH ?= ssh
@@ -39,12 +41,18 @@ endif
 
 .PHONY: help
 help:
-	@echo "Slurm Workflow"
+	@echo "Cluster Workflows"
+	@echo ""
+	@echo "make docker up                             Start Docker Ray cluster"
+	@echo "make docker down                           Stop Docker Ray cluster"
+	@echo "make docker status                         Show Docker Ray services"
+	@echo "make docker logs                           Tail Docker Ray logs"
+	@echo "make docker dashboard                      Print dashboard URL"
 	@echo ""
 	@echo "make slurm up                              Submit Slurm Ray cluster job"
 	@echo "make slurm down                            Cancel tracked Slurm job"
 	@echo ""
-	@echo "All Slurm configuration must be set in .env."
+	@echo "All configuration must be set in .env."
 
 .PHONY: env
 env:
@@ -54,6 +62,50 @@ env:
 	else \
 		echo "$(ENV_FILE) already exists"; \
 	fi
+
+.PHONY: docker
+docker:
+	@set -e; \
+	CMD="$(SUBCMD)"; \
+	if [ -z "$$CMD" ]; then \
+		echo "Usage: make docker up|down|status|logs|dashboard"; \
+		exit 1; \
+	fi; \
+	if ! ( [ -x "$(DOCKER)" ] || command -v "$(DOCKER)" >/dev/null 2>&1 ); then \
+		echo "Error: docker not found (DOCKER=$(DOCKER))."; \
+		exit 127; \
+	fi; \
+	if [ ! -f "$(COMPOSE_FILE)" ]; then \
+		echo "Docker compose file not found: $(COMPOSE_FILE)"; \
+		exit 1; \
+	fi; \
+	case "$$CMD" in \
+		up) \
+			REPLICAS="$(WORKER_REPLICAS)"; \
+			if [ -z "$$REPLICAS" ]; then REPLICAS="1"; fi; \
+			echo "Starting Docker Ray cluster with $$REPLICAS worker(s)"; \
+			$(DOCKER) compose --env-file "$(ENV_FILE)" -f "$(COMPOSE_FILE)" up -d --scale ray-worker="$$REPLICAS"; \
+			echo "Ray dashboard: http://localhost:$(RAY_DASHBOARD_PORT)"; \
+			;; \
+		down) \
+			echo "Stopping Docker Ray cluster"; \
+			$(DOCKER) compose --env-file "$(ENV_FILE)" -f "$(COMPOSE_FILE)" down --remove-orphans; \
+			;; \
+		status) \
+			$(DOCKER) compose --env-file "$(ENV_FILE)" -f "$(COMPOSE_FILE)" ps; \
+			;; \
+		logs) \
+			$(DOCKER) compose --env-file "$(ENV_FILE)" -f "$(COMPOSE_FILE)" logs -f; \
+			;; \
+		dashboard) \
+			echo "Ray dashboard: http://localhost:$(RAY_DASHBOARD_PORT)"; \
+			;; \
+		*) \
+			echo "Unknown subcommand: $$CMD"; \
+			echo "Usage: make docker up|down|status|logs|dashboard"; \
+			exit 1; \
+			;; \
+	esac
 
 .PHONY: slurm
 slurm:
@@ -201,6 +253,6 @@ CLUSTER_STABILIZE_WAIT_SECONDS='$(CLUSTER_STABILIZE_WAIT_SECONDS)' \
 	esac
 
 # Dummy targets so `make slurm up` style works.
-.PHONY: up down
-up down:
+.PHONY: up down status logs dashboard
+up down status logs dashboard:
 	@:

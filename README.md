@@ -1,128 +1,192 @@
 # Ray Cluster Experiment
 
-This repository supports Ray cluster runs in two modes:
+This repo runs Ray in two modes:
 
-- Docker Compose cluster (`make ray ...`)
-- Slurm cluster (`make slurm ...`)
+- Docker (`make docker ...`)
+- Slurm (`make slurm ...`)
 
-## Repository Layout
+Run `make help` anytime to see commands.
 
-- `docker-compose.yaml` - Docker Ray head/worker stack
-- `.env.example` - Docker defaults for ports/resources
-- `.env` - Local Docker overrides used by `docker compose --env-file`
-- `Makefile` - Unified interface for Docker and Slurm workflows
-- `scripts/slurm/ray_cluster.sbatch` - Slurm-based Ray head/worker launcher + job runner
-- `jobs/demo_job.py` - Example Ray job (`ray.init(address="auto")`)
-- `jobs/pipeline_job.py` - Pipelined actor example job
+## 1) Quick Start: Docker (fastest)
 
-## Docker Workflow
-
-Start cluster:
+1. Create local config:
 
 ```bash
-make ray up
+make env
 ```
 
-Scale workers:
+2. (Optional) edit `.env`:
+
+- `WORKER_REPLICAS=1`
+- `RAY_DASHBOARD_PORT=8265`
+- `RAY_PORT=6379`
+
+3. Start cluster:
 
 ```bash
-make ray up N=3
+make docker up
 ```
 
-Cluster checks:
+4. Check it:
 
 ```bash
-make ray status
-make ray dashboard
+make docker status
+make docker dashboard
 ```
 
-Tail logs:
+5. Stop:
 
 ```bash
-make ray logs
+make docker down
 ```
 
-Stop cluster:
+## 2) Quick Start: Slurm
 
-```bash
-make ray down
-```
+1. Update Slurm directives in `scripts/slurm/ray_cluster.sbatch`:
 
-Submit local file as Ray job:
+- `#SBATCH --account=...`
+- `#SBATCH --nodes=...`
+- `#SBATCH --gpus-per-node=...`
+- `#SBATCH --time=...`
 
-```bash
-make ray job FILE=jobs/demo_job.py
-make ray job FILE=jobs/demo_job.py ARGS="--count 20"
-```
+2. Set required values in `.env`:
 
-## Slurm Workflow
+- `PROJECT_ROOT=/abs/path/to/your/project/on-cluster`
+- `VENV_ACTIVATE=.venv/bin/activate` (relative to `PROJECT_ROOT` or absolute)
+- `ENTRYPOINT=abcrown.py` (or your script)
+- `ENTRYPOINT_ARGS=--flag1 x --flag2 y`
 
-Update `scripts/slurm/ray_cluster.sbatch` SBATCH directives for your cluster (`--account`, `--nodes`, GPU type, walltime, output).
+Notes:
+- Do not quote `ENTRYPOINT_ARGS`.
+- If `ENTRYPOINT_CMD` is set, it overrides `ENTRYPOINT` + `ENTRYPOINT_ARGS`.
+- Entrypoint is run with `uv run`.
 
-Allocate/start Slurm job:
-
-```bash
-make slurm up
-```
-
-Configure Slurm runtime in `.env` (for example `PROJECT_ROOT`, `ENTRYPOINT`, `ENTRYPOINT_ARGS`, `ENTRYPOINT_CMD`, `SLURM_JOB_NAME`) and submit:
+3. Submit:
 
 ```bash
 make slurm up
 ```
 
-`VENV_ACTIVATE` may be absolute or relative to `PROJECT_ROOT` (for SSH sync flow, `.venv/bin/activate` is usually easiest).
-`make slurm ...` no longer accepts command-line variable overrides; set all values in `.env`.
-
-Stop job:
+4. Stop:
 
 ```bash
 make slurm down
 ```
 
-`scripts/slurm/ray_cluster.sbatch` starts Ray head on the first allocated node, starts workers on remaining nodes, runs either `uv run <ENTRYPOINT_CMD>` (if set) or `uv run ENTRYPOINT ENTRYPOINT_ARGS` on the head node, and stops Ray processes on exit.
+## Slurm via SSH login node
 
-`make slurm up` stores the submitted job id in `.slurm-ray-jobid`; `make slurm down` uses that file by default.
+Required SSH setup:
 
-If Slurm CLI is only available on a login node, run through SSH:
+- OpenSSH client installed locally (`ssh` command available).
+- A private key that can log in to your cluster account.
+- A host entry in `~/.ssh/config` (recommended) so `SLURM_LOGIN` can use an alias.
 
-```bash
-make slurm up
-make slurm down
-```
-
-Set `SLURM_LOGIN` and `SLURM_REMOTE_DIR` in `.env` for SSH mode.
-
-If you use an SSH alias, add a host entry in `~/.ssh/config`:
+Example `~/.ssh/config`:
 
 ```sshconfig
 Host phoenix
   HostName login-p.pace.gatech.edu
-  IdentityFile ~/.ssh/<your-ssh-key>
-  User <username>
+  User <your-username>
+  IdentityFile ~/.ssh/<your-private-key>
+  IdentitiesOnly yes
 ```
 
-Then set `SLURM_LOGIN=phoenix` in `.env`.
-
-When `SLURM_LOGIN` is set, `make slurm ...` now auto-syncs required project files to `SLURM_REMOTE_DIR` via `scp` before running remote commands. The default sync list is:
-`Makefile scripts/slurm/ray_cluster.sbatch .env`
-
-You can disable syncing or customize the file list by updating `.env`:
+Quick check:
 
 ```bash
-SLURM_SYNC=0
-SLURM_SYNC_FILES=Makefile scripts/slurm/ray_cluster.sbatch jobs/pipeline_job.py .env
+ssh phoenix "hostname && which sbatch && which scancel"
 ```
 
-If `VENV_ACTIVATE` does not exist on the compute nodes, `scripts/slurm/ray_cluster.sbatch` now bootstraps it with `uv` from `pyproject.toml` (using `uv.lock` when present) before sourcing the venv.
+If Slurm CLI is only available on a login node, set in `.env`:
 
-At teardown, worker Ray logs are collected into one job folder on shared storage:
-`<SLURM_REMOTE_DIR>/logs/ray-slurm/<slurm_job_id>/<node>/...` by default
-(override with `RAY_LOG_ARCHIVE_DIR`).
+- `SLURM_LOGIN=your_ssh_host_or_alias`
+- `SLURM_REMOTE_DIR=/remote/path/for/this/repo`
 
-If `SLURM_LOGIN` is set and `SLURM_REMOTE_DIR` is left empty, it defaults to the repo folder name under your remote home directory (for example `mnmg-nnv`).
+Then run the same commands:
 
-## Notes
+```bash
+make slurm up
+make slurm down
+```
 
-- For cluster-connected scripts, use `ray.init(address="auto")`.
-- `make slurm ...` commands require Slurm CLI tools (`sbatch`, `scancel`) in `PATH` and should be run on your HPC Slurm login node.
+Behavior:
+- Files in `SLURM_SYNC_FILES` are synced to `SLURM_REMOTE_DIR` via `tar` over `ssh`.
+- Submitted job id is stored in `.slurm-ray-jobid`.
+- Ray logs are archived under `logs/ray-slurm/<job_id>/...` by default.
+
+## Command Reference
+
+- `make env`
+- `make docker up|down|status|logs|dashboard`
+- `make slurm up|down`
+
+## Where Logs Go
+
+### Docker (`make docker ...`)
+
+- Runtime logs (head + workers): stream with:
+
+```bash
+make docker logs
+```
+
+- Service status + container names:
+
+```bash
+make docker status
+```
+
+- Ray internal logs inside containers:
+  - Head: `/tmp/ray/session_latest/logs/`
+  - Worker(s): `/tmp/ray/session_latest/logs/`
+  - Example:
+
+```bash
+docker compose --env-file .env -f docker-compose.yaml exec ray-head ls -lah /tmp/ray/session_latest/logs
+```
+
+### Slurm (`make slurm ...`)
+
+- Main Slurm job log (stdout/stderr) is written by:
+  - `#SBATCH --output=ray-poc-%j.log`
+  - So for job `6315510`, log is `ray-poc-6315510.log`.
+
+- If running locally on login node:
+  - Log path: `<repo>/ray-poc-<job_id>.log`
+
+- If running through SSH (`SLURM_LOGIN` + `SLURM_REMOTE_DIR`):
+  - Log path: `<SLURM_REMOTE_DIR>/ray-poc-<job_id>.log`
+
+- Per-node Ray logs are archived at teardown:
+  - Default: `logs/ray-slurm/<job_id>/<node>/...`
+  - In SSH mode: `<SLURM_REMOTE_DIR>/logs/ray-slurm/<job_id>/<node>/...`
+  - Override with `RAY_LOG_ARCHIVE_DIR` in `.env`.
+
+- Useful commands:
+
+```bash
+# Current/last submitted job id (local mode)
+cat .slurm-ray-jobid
+
+# Tail main Slurm log
+tail -f ray-poc-<job_id>.log
+
+# Inspect archived per-node Ray logs
+find logs/ray-slurm/<job_id> -maxdepth 3 -type f
+```
+
+```bash
+# SSH mode equivalents (run from your laptop/workstation)
+ssh "$SLURM_LOGIN" "cat $SLURM_REMOTE_DIR/.slurm-ray-jobid"
+ssh "$SLURM_LOGIN" "tail -f $SLURM_REMOTE_DIR/ray-poc-<job_id>.log"
+ssh "$SLURM_LOGIN" "find $SLURM_REMOTE_DIR/logs/ray-slurm/<job_id> -maxdepth 3 -type f"
+```
+
+## Common Errors
+
+- `/bin/sh: export: ... not a valid identifier`:
+  - `ENTRYPOINT_ARGS` was quoted or split incorrectly. Keep it unquoted.
+- `Address already in use ... 6379`:
+  - Another Ray head is already using that port. Stop old job or change `RAY_PORT`.
+- `Failed to get cluster ID from GCS` / GCS timeout:
+  - Usually downstream of head startup failure. Check `ray-poc-<jobid>.log` first.
