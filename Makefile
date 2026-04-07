@@ -6,10 +6,14 @@ REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 SLURM_SCRIPT ?= scripts/slurm/ray_cluster.sbatch
 SLURM_JOB_FILE ?= .slurm-ray-jobid
+CLUSTER_SCRIPT ?= scripts/cluster/ray_cluster_ips.sh
+CLUSTER_HOSTS_FILE ?= conf/cluster_hosts.conf
+CLUSTER_STATE_FILE ?= .ray-cluster-hosts
 
 SBATCH ?= sbatch
 SCANCEL ?= scancel
 SLURM_SSH ?= ssh
+CLUSTER_SSH ?= ssh
 
 SLURM_LOGIN ?=
 SLURM_REMOTE_DIR ?= $(CURDIR)
@@ -39,12 +43,14 @@ endif
 
 .PHONY: help
 help:
-	@echo "Slurm Workflow"
+	@echo "Cluster Workflows"
 	@echo ""
 	@echo "make slurm up                              Submit Slurm Ray cluster job"
 	@echo "make slurm down                            Cancel tracked Slurm job"
+	@echo "make cluster up                            Start Ray cluster on IPs in CLUSTER_HOSTS_FILE"
+	@echo "make cluster down                          Stop Ray cluster on IPs in CLUSTER_HOSTS_FILE"
 	@echo ""
-	@echo "All Slurm configuration must be set in .env."
+	@echo "All configuration must be set in .env."
 
 .PHONY: env
 env:
@@ -199,6 +205,41 @@ CLUSTER_STABILIZE_WAIT_SECONDS='$(CLUSTER_STABILIZE_WAIT_SECONDS)' \
 			fi; \
 			;; \
 	esac
+
+.PHONY: cluster
+cluster:
+	@set -e; \
+	CMD="$(SUBCMD)"; \
+	if [ -z "$$CMD" ]; then \
+		echo "Usage: make cluster up|down"; \
+		exit 1; \
+	fi; \
+	case "$$CMD" in \
+		up|down) ;; \
+		*) \
+			echo "Unknown subcommand: $$CMD"; \
+			echo "Usage: make cluster up|down"; \
+			exit 1; \
+			;; \
+	esac; \
+	SCRIPT="$(CLUSTER_SCRIPT)"; \
+	if [ ! -f "$$SCRIPT" ]; then \
+		echo "Cluster script not found: $$SCRIPT"; \
+		exit 1; \
+	fi; \
+	if ! ( [ -x "$(CLUSTER_SSH)" ] || command -v "$(CLUSTER_SSH)" >/dev/null 2>&1 ); then \
+		echo "Error: ssh not found (CLUSTER_SSH=$(CLUSTER_SSH))."; \
+		exit 127; \
+	fi; \
+	export CLUSTER_HOSTS_FILE="$(CLUSTER_HOSTS_FILE)"; \
+	export CLUSTER_STATE_FILE="$(CLUSTER_STATE_FILE)"; \
+	export CLUSTER_SSH="$(CLUSTER_SSH)"; \
+	export PROJECT_ROOT="$(PROJECT_ROOT)"; \
+	export VENV_ACTIVATE="$(VENV_ACTIVATE)"; \
+	export RAY_PORT="$(RAY_PORT)"; \
+	export RAY_CLIENT_PORT="$(RAY_CLIENT_PORT)"; \
+	export RAY_DASHBOARD_PORT="$(RAY_DASHBOARD_PORT)"; \
+	bash "$$SCRIPT" "$$CMD"
 
 # Dummy targets so `make slurm up` style works.
 .PHONY: up down

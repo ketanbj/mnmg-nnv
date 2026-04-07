@@ -2,58 +2,35 @@
 
 This repository supports Ray cluster runs in two modes:
 
-- Docker Compose cluster (`make ray ...`)
 - Slurm cluster (`make slurm ...`)
+- Static IP cluster via SSH (`make cluster ...`)
 
 ## Repository Layout
 
-- `docker-compose.yaml` - Docker Ray head/worker stack
-- `.env.example` - Docker defaults for ports/resources
-- `.env` - Local Docker overrides used by `docker compose --env-file`
-- `Makefile` - Unified interface for Docker and Slurm workflows
+- `conf/cluster_hosts.conf` - IP/host list for static cluster mode
+- `.env.example` - Example configuration values
+- `.env` - Local configuration consumed by `make` targets
+- `Makefile` - Unified interface for Slurm and static-IP workflows
 - `scripts/slurm/ray_cluster.sbatch` - Slurm-based Ray head/worker launcher + job runner
+- `scripts/cluster/ray_cluster_ips.sh` - IP-based Ray head/worker launcher + teardown
 - `jobs/demo_job.py` - Example Ray job (`ray.init(address="auto")`)
 - `jobs/pipeline_job.py` - Pipelined actor example job
 
-## Docker Workflow
+## Static IP Workflow
 
-Start cluster:
-
-```bash
-make ray up
-```
-
-Scale workers:
+Put node addresses in `conf/cluster_hosts.conf` (first line is head node), then run:
 
 ```bash
-make ray up N=3
+make cluster up
+make cluster down
 ```
 
-Cluster checks:
+Configure in `.env`:
 
-```bash
-make ray status
-make ray dashboard
-```
-
-Tail logs:
-
-```bash
-make ray logs
-```
-
-Stop cluster:
-
-```bash
-make ray down
-```
-
-Submit local file as Ray job:
-
-```bash
-make ray job FILE=jobs/demo_job.py
-make ray job FILE=jobs/demo_job.py ARGS="--count 20"
-```
+- `CLUSTER_HOSTS_FILE` (default `conf/cluster_hosts.conf`)
+- `CLUSTER_STATE_FILE` (default `.ray-cluster-hosts`)
+- `CLUSTER_SSH` (default `ssh`)
+- `PROJECT_ROOT`, `VENV_ACTIVATE`, `RAY_PORT`, `RAY_CLIENT_PORT`, `RAY_DASHBOARD_PORT`
 
 ## Slurm Workflow
 
@@ -104,7 +81,7 @@ Host phoenix
 
 Then set `SLURM_LOGIN=phoenix` in `.env`.
 
-When `SLURM_LOGIN` is set, `make slurm ...` now auto-syncs required project files to `SLURM_REMOTE_DIR` via `scp` before running remote commands. The default sync list is:
+When `SLURM_LOGIN` is set, `make slurm ...` now auto-syncs required project files to `SLURM_REMOTE_DIR` via `tar` over `ssh` before running remote commands. The default sync list is:
 `Makefile scripts/slurm/ray_cluster.sbatch .env`
 
 You can disable syncing or customize the file list by updating `.env`:
