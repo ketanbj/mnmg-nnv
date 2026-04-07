@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=gts-jyoung9-csse
-#SBATCH --nodes=1
+#SBATCH --nodes=3
 #SBATCH --gpus-per-node=RTX_6000:1
 #SBATCH --time=01:00:00
 #SBATCH --job-name=ray-poc
