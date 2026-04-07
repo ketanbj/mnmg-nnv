@@ -1,24 +1,29 @@
-COMPOSE_FILE := docker-compose.yaml
 ENV_FILE := .env
-DOCKER_COMPOSE := docker compose --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 
-# Load local defaults (including SLURM_* settings) from .env when present.
+# Load local defaults from .env when present.
 -include $(ENV_FILE)
 
 SLURM_SCRIPT ?= scripts/slurm/ray_cluster.sbatch
 SLURM_JOB_FILE ?= .slurm-ray-jobid
+
 SBATCH ?= sbatch
-SQUEUE ?= squeue
 SCANCEL ?= scancel
 SLURM_SSH ?= ssh
 SLURM_SCP ?= scp
+
 SLURM_LOGIN ?=
 SLURM_REMOTE_DIR ?= $(CURDIR)
+SLURM_JOB_NAME ?=
 SLURM_SYNC ?= 1
-SLURM_SYNC_FILES ?= Makefile README.md pyproject.toml uv.lock jobs scripts .env .env.example
-WORKER_REPLICAS ?= 1
-N ?= $(WORKER_REPLICAS)
+SLURM_SYNC_FILES ?= Makefile scripts/slurm/ray_cluster.sbatch .env
+SLURM_REMOTE_BYPASS ?=
+
 SUBCMD := $(word 2,$(MAKECMDGOALS))
+
+# All configuration must come from .env, not command-line VAR=value overrides.
+ifneq ($(strip $(MAKEOVERRIDES)),)
+$(error Command-line variable overrides are not supported. Set values in $(ENV_FILE))
+endif
 
 # If running through SSH and SLURM_REMOTE_DIR is empty, use a repo-name path
 # relative to remote $HOME. Otherwise, keep local-repo fallback.
@@ -34,24 +39,12 @@ endif
 
 .PHONY: help
 help:
-	@echo "Ray Cluster Experiment"
+	@echo "Slurm Workflow"
 	@echo ""
-	@echo "make ray up [N=2]                          Start cluster and scale workers"
-	@echo "make ray down                              Stop and remove cluster"
-	@echo "make ray status                            Show Ray cluster status"
-	@echo "make ray logs                              Tail head + worker logs"
-	@echo "make ray dashboard                         Print dashboard URL"
-	@echo "make ray job FILE=jobs/demo_job.py         Submit local Python file as Ray job"
-	@echo "make ray job FILE=jobs/demo_job.py ARGS='--x 1'   Submit with script args"
+	@echo "make slurm up                              Submit Slurm Ray cluster job"
+	@echo "make slurm down                            Cancel tracked Slurm job"
 	@echo ""
-	@echo "make slurm up                              Allocate/start Slurm Ray cluster job"
-	@echo "make slurm up ENTRYPOINT=jobs/pipeline_job.py Run a different script"
-	@echo "make slurm down [JOBID=123456]             Deallocate/cancel Slurm Ray cluster job"
-	@echo "make slurm queue                           Show your Slurm queue"
-	@echo "make slurm up SBATCH=/path/to/sbatch       Override Slurm CLI paths if PATH differs"
-	@echo "make slurm up SLURM_LOGIN=user@login       Run Slurm commands via SSH on login node"
-	@echo "make slurm up SLURM_SYNC=0                 Disable auto scp sync before SSH execution"
-	@echo "make slurm submit / make slurm cancel      Backward-compatible aliases"
+	@echo "All Slurm configuration must be set in .env."
 
 .PHONY: env
 env:
@@ -62,62 +55,22 @@ env:
 		echo "$(ENV_FILE) already exists"; \
 	fi
 
-.PHONY: ray
-ray: env
-	@set -e; \
-	case "$(SUBCMD)" in \
-		up) \
-			SCALE="$(N)"; \
-			echo "Starting Ray cluster (workers=$$SCALE)..."; \
-			$(DOCKER_COMPOSE) up -d --scale ray-worker=$$SCALE ray-head ray-worker; \
-			;; \
-		down) \
-			echo "Stopping Ray cluster..."; \
-			$(DOCKER_COMPOSE) down; \
-			;; \
-		status) \
-			$(DOCKER_COMPOSE) exec ray-head ray status; \
-			;; \
-		logs) \
-			$(DOCKER_COMPOSE) logs -f ray-head ray-worker; \
-			;; \
-		dashboard) \
-			DASH_PORT=$$(grep -E '^RAY_DASHBOARD_PORT=' $(ENV_FILE) | cut -d'=' -f2); \
-			if [ -z "$$DASH_PORT" ]; then DASH_PORT=8265; fi; \
-			echo "Ray Dashboard: http://localhost:$$DASH_PORT"; \
-			;; \
-		job) \
-			if [ -z "$(FILE)" ]; then \
-				echo "Usage: make ray job FILE=/absolute/or/relative/path.py [ARGS='...']"; \
-				exit 1; \
-			fi; \
-			if [ ! -f "$(FILE)" ]; then \
-				echo "File not found: $(FILE)"; \
-				exit 1; \
-			fi; \
-			BASENAME=$$(basename "$(FILE)"); \
-			REMOTE_DIR=/tmp/ray_jobs; \
-			REMOTE_PATH=$$REMOTE_DIR/$$BASENAME; \
-			echo "Submitting job from: $(FILE)"; \
-			$(DOCKER_COMPOSE) exec ray-head mkdir -p $$REMOTE_DIR; \
-			$(DOCKER_COMPOSE) cp "$(FILE)" ray-head:$$REMOTE_PATH; \
-			$(DOCKER_COMPOSE) exec ray-head ray job submit \
-				--address=http://127.0.0.1:8265 \
-				-- python $$REMOTE_PATH $(ARGS); \
-			;; \
-		""|help) \
-			$(MAKE) help; \
-			;; \
-		*) \
-			echo "Unknown subcommand: $(SUBCMD)"; \
-			echo "Run: make ray help"; \
-			exit 1; \
-			;; \
-	esac
-
 .PHONY: slurm
 slurm:
 	@set -e; \
+	CMD="$(SUBCMD)"; \
+	if [ -z "$$CMD" ]; then \
+		echo "Usage: make slurm up|down"; \
+		exit 1; \
+	fi; \
+	case "$$CMD" in \
+		up|down) ;; \
+		*) \
+			echo "Unknown subcommand: $$CMD"; \
+			echo "Usage: make slurm up|down"; \
+			exit 1; \
+			;; \
+	esac; \
 	if [ -n "$(SLURM_LOGIN)" ] && [ -z "$(SLURM_REMOTE_BYPASS)" ]; then \
 		case "$(SLURM_LOGIN)" in \
 			http://*|https://*) \
@@ -132,45 +85,62 @@ slurm:
 				exit 2; \
 				;; \
 		esac; \
-		if [ "$(SLURM_SYNC)" = "1" ]; then \
-			if ! ( [ -x "$(SLURM_SCP)" ] || command -v "$(SLURM_SCP)" >/dev/null 2>&1 ); then \
-				echo "Error: scp not found (SLURM_SCP=$(SLURM_SCP))."; \
-				echo "Install OpenSSH client or pass SLURM_SCP=/absolute/path/to/scp."; \
-				exit 127; \
-			fi; \
-			echo "Syncing files to login node: $(SLURM_LOGIN):$(SLURM_REMOTE_DIR)"; \
-			$(SLURM_SSH) "$(SLURM_LOGIN)" "mkdir -p \"$(SLURM_REMOTE_DIR)\""; \
-			for path in $(SLURM_SYNC_FILES); do \
-				if [ ! -e "$$path" ]; then \
-					echo "Warning: sync path not found locally, skipping: $$path"; \
-					continue; \
+			if [ "$(SLURM_SYNC)" = "1" ]; then \
+				if ! ( [ -x "$(SLURM_SCP)" ] || command -v "$(SLURM_SCP)" >/dev/null 2>&1 ); then \
+					echo "Error: scp not found (SLURM_SCP=$(SLURM_SCP))."; \
+					echo "Install OpenSSH client or pass SLURM_SCP=/absolute/path/to/scp."; \
+					exit 127; \
 				fi; \
-				$(SLURM_SCP) -r "$$path" "$(SLURM_LOGIN):$(SLURM_REMOTE_DIR)/"; \
-			done; \
-		fi; \
+				echo "Syncing files to login node: $(SLURM_LOGIN):$(SLURM_REMOTE_DIR)"; \
+				$(SLURM_SSH) "$(SLURM_LOGIN)" "mkdir -p \"$(SLURM_REMOTE_DIR)\""; \
+				SYNCED=0; \
+				for path in $(SLURM_SYNC_FILES); do \
+					if [ ! -e "$$path" ]; then \
+						echo "Warning: sync path not found locally, skipping: $$path"; \
+						continue; \
+					fi; \
+					REMOTE_PARENT=$$(dirname "$$path"); \
+					$(SLURM_SSH) "$(SLURM_LOGIN)" "mkdir -p \"$(SLURM_REMOTE_DIR)/$$REMOTE_PARENT\""; \
+					if [ -d "$$path" ]; then \
+						$(SLURM_SCP) -r "$$path" "$(SLURM_LOGIN):$(SLURM_REMOTE_DIR)/$$REMOTE_PARENT/"; \
+					else \
+						$(SLURM_SCP) "$$path" "$(SLURM_LOGIN):$(SLURM_REMOTE_DIR)/$$REMOTE_PARENT/"; \
+					fi; \
+					SYNCED=1; \
+				done; \
+				if [ "$$SYNCED" != "1" ]; then \
+					echo "Warning: no sync paths found; skipping scp."; \
+				fi; \
+			fi; \
+		JOB_NAME="$(SLURM_JOB_NAME)"; \
+		if [ -z "$$JOB_NAME" ]; then JOB_NAME="ray-$$(date +%Y%m%d-%H%M%S)-$$(printf "%06d" $$RANDOM)"; fi; \
+		echo "Using Slurm job name: $$JOB_NAME"; \
 		echo "Running Slurm command on login node: $(SLURM_LOGIN)"; \
 		$(SLURM_SSH) "$(SLURM_LOGIN)" \
-			"cd \"$(SLURM_REMOTE_DIR)\" && make --no-print-directory slurm $(SUBCMD) \
+			"cd \"$(SLURM_REMOTE_DIR)\" && env \
 SLURM_REMOTE_BYPASS=1 \
 SBATCH='$(SBATCH)' \
-SQUEUE='$(SQUEUE)' \
 SCANCEL='$(SCANCEL)' \
 SLURM_SCRIPT='$(SLURM_SCRIPT)' \
 SLURM_JOB_FILE='$(SLURM_JOB_FILE)' \
-JOBID='$(JOBID)' \
+SLURM_JOB_NAME='$$JOB_NAME' \
 VENV_ACTIVATE='$(VENV_ACTIVATE)' \
 PROJECT_ROOT='$(PROJECT_ROOT)' \
+UV_BIN='$(UV_BIN)' \
 ENTRYPOINT='$(ENTRYPOINT)' \
 ENTRYPOINT_ARGS='$(ENTRYPOINT_ARGS)' \
+ENTRYPOINT_CMD='$(ENTRYPOINT_CMD)' \
 RAY_PORT='$(RAY_PORT)' \
 RAY_DASHBOARD_PORT='$(RAY_DASHBOARD_PORT)' \
+RAY_LOG_ARCHIVE_DIR='$(RAY_LOG_ARCHIVE_DIR)' \
 HEAD_STARTUP_WAIT_SECONDS='$(HEAD_STARTUP_WAIT_SECONDS)' \
 WORKER_STARTUP_WAIT_SECONDS='$(WORKER_STARTUP_WAIT_SECONDS)' \
-CLUSTER_STABILIZE_WAIT_SECONDS='$(CLUSTER_STABILIZE_WAIT_SECONDS)'"; \
+CLUSTER_STABILIZE_WAIT_SECONDS='$(CLUSTER_STABILIZE_WAIT_SECONDS)' \
+	make --no-print-directory slurm $$CMD"; \
 		exit $$?; \
 	fi; \
-	case "$(SUBCMD)" in \
-		up|submit) \
+	case "$$CMD" in \
+		up) \
 			if ! ( [ -x "$(SBATCH)" ] || command -v "$(SBATCH)" >/dev/null 2>&1 ); then \
 				echo "Error: sbatch not found (SBATCH=$(SBATCH))."; \
 				echo "Run this command on a Slurm login node, load your Slurm module, or pass SBATCH=/absolute/path/to/sbatch."; \
@@ -181,17 +151,23 @@ CLUSTER_STABILIZE_WAIT_SECONDS='$(CLUSTER_STABILIZE_WAIT_SECONDS)'"; \
 				echo "Slurm script not found: $$SCRIPT"; \
 				exit 1; \
 			fi; \
+			JOB_NAME="$(SLURM_JOB_NAME)"; \
+			if [ -z "$$JOB_NAME" ]; then JOB_NAME="ray-$$(date +%Y%m%d-%H%M%S)-$$(printf "%06d" $$RANDOM)"; fi; \
+			echo "Using Slurm job name: $$JOB_NAME"; \
 			echo "Submitting Slurm job: $$SCRIPT"; \
 			export VENV_ACTIVATE="$(VENV_ACTIVATE)"; \
 			export PROJECT_ROOT="$(PROJECT_ROOT)"; \
+			export UV_BIN="$(UV_BIN)"; \
 			export ENTRYPOINT="$(ENTRYPOINT)"; \
 			export ENTRYPOINT_ARGS="$(ENTRYPOINT_ARGS)"; \
+			export ENTRYPOINT_CMD="$(ENTRYPOINT_CMD)"; \
 			export RAY_PORT="$(RAY_PORT)"; \
 			export RAY_DASHBOARD_PORT="$(RAY_DASHBOARD_PORT)"; \
+			export RAY_LOG_ARCHIVE_DIR="$(RAY_LOG_ARCHIVE_DIR)"; \
 			export HEAD_STARTUP_WAIT_SECONDS="$(HEAD_STARTUP_WAIT_SECONDS)"; \
 			export WORKER_STARTUP_WAIT_SECONDS="$(WORKER_STARTUP_WAIT_SECONDS)"; \
 			export CLUSTER_STABILIZE_WAIT_SECONDS="$(CLUSTER_STABILIZE_WAIT_SECONDS)"; \
-			SUBMIT_OUTPUT=$$($(SBATCH) --export=ALL "$$SCRIPT"); \
+			SUBMIT_OUTPUT=$$($(SBATCH) --export=ALL --job-name="$$JOB_NAME" "$$SCRIPT"); \
 			echo "$$SUBMIT_OUTPUT"; \
 			JOB_ID=$$(printf "%s\n" "$$SUBMIT_OUTPUT" | awk '/Submitted batch job/ {print $$4}'); \
 			if [ -n "$$JOB_ID" ]; then \
@@ -201,27 +177,17 @@ CLUSTER_STABILIZE_WAIT_SECONDS='$(CLUSTER_STABILIZE_WAIT_SECONDS)'"; \
 				echo "Warning: could not parse submitted job id"; \
 			fi; \
 			;; \
-		queue) \
-			if ! ( [ -x "$(SQUEUE)" ] || command -v "$(SQUEUE)" >/dev/null 2>&1 ); then \
-				echo "Error: squeue not found (SQUEUE=$(SQUEUE))."; \
-				echo "Run this command on a Slurm login node, load your Slurm module, or pass SQUEUE=/absolute/path/to/squeue."; \
-				exit 127; \
-			fi; \
-			SHOW_USER="$(USER)"; \
-			if [ -z "$$SHOW_USER" ]; then SHOW_USER=$$(id -un); fi; \
-			$(SQUEUE) -u "$$SHOW_USER"; \
-			;; \
-		down|cancel) \
+		down) \
 			if ! ( [ -x "$(SCANCEL)" ] || command -v "$(SCANCEL)" >/dev/null 2>&1 ); then \
 				echo "Error: scancel not found (SCANCEL=$(SCANCEL))."; \
 				echo "Run this command on a Slurm login node, load your Slurm module, or pass SCANCEL=/absolute/path/to/scancel."; \
 				exit 127; \
 			fi; \
-			JOB_ID="$(JOBID)"; \
-			if [ -z "$$JOB_ID" ] && [ -f "$(SLURM_JOB_FILE)" ]; then JOB_ID=$$(cat "$(SLURM_JOB_FILE)"); fi; \
+			JOB_ID=""; \
+			if [ -f "$(SLURM_JOB_FILE)" ]; then JOB_ID=$$(cat "$(SLURM_JOB_FILE)"); fi; \
 			if [ -z "$$JOB_ID" ]; then \
-				echo "Usage: make slurm down JOBID=<job_id>"; \
-				echo "Or run make slurm up first (stores id in $(SLURM_JOB_FILE))."; \
+				echo "No tracked job id found in $(SLURM_JOB_FILE)."; \
+				echo "Run make slurm up first or cancel manually with scancel <job_id>."; \
 				exit 1; \
 			fi; \
 			echo "Cancelling Slurm job: $$JOB_ID"; \
@@ -230,17 +196,9 @@ CLUSTER_STABILIZE_WAIT_SECONDS='$(CLUSTER_STABILIZE_WAIT_SECONDS)'"; \
 				rm -f "$(SLURM_JOB_FILE)"; \
 			fi; \
 			;; \
-		""|help) \
-			$(MAKE) help; \
-			;; \
-		*) \
-			echo "Unknown subcommand: $(SUBCMD)"; \
-			echo "Run: make slurm help"; \
-			exit 1; \
-			;; \
 	esac
 
-# Dummy targets so `make ray up`/`make ray down` style works cleanly.
-.PHONY: up down status logs dashboard job submit queue cancel
-up down status logs dashboard job submit queue cancel:
+# Dummy targets so `make slurm up` style works.
+.PHONY: up down
+up down:
 	@:

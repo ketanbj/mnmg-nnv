@@ -2,10 +2,9 @@
 #SBATCH --account=gts-jyoung9-csse
 #SBATCH --nodes=3
 #SBATCH --gpus-per-node=RTX_6000:1
-#SBATCH --time=4:00:00
+#SBATCH --time=00:15:00
 #SBATCH --job-name=ray-poc
 #SBATCH --output=ray-poc-%j.log
-#SBATCH --exclusive
 
 set -euo pipefail
 
@@ -16,13 +15,18 @@ export SHELL=/bin/bash
 # Runtime overrides:
 #   VENV_ACTIVATE=/path/to/.venv/bin/activate
 #   PROJECT_ROOT=/path/to/project/root
-#   ENTRYPOINT=jobs/demo_job.py
-#   ENTRYPOINT_ARGS="--count 20"
+#   UV_BIN=uv
+#   ENTRYPOINT=abcrown.py
+#   ENTRYPOINT_ARGS="--disable_hugetensor_allocator --batch_size 256 --no_auto_enlarge_batch_size --config /storage/project/r-jyoung9-1/shared/nnv/exp_configs/alpha-beta-CROWN-performance-study/cifar_100.yaml --select_instance 66"
+#   ENTRYPOINT_CMD=abcrown.py --disable_hugetensor_allocator --batch_size 256 --no_auto_enlarge_batch_size --config /storage/project/r-jyoung9-1/shared/nnv/exp_configs/alpha-beta-CROWN-performance-study/cifar_100.yaml --select_instance 66
 #   RAY_PORT=6379
 #   RAY_DASHBOARD_PORT=8265
+#   RAY_LOG_ARCHIVE_DIR=logs/ray-slurm
 PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+SLURM_LOG_BASE_DIR="${SLURM_SUBMIT_DIR:-$PROJECT_ROOT}"
 DEFAULT_VENV_ACTIVATE="$PROJECT_ROOT/.venv/bin/activate"
 LEGACY_VENV_ACTIVATE="$HOME/src/Verifier_Development/complete_verifier/.venv/bin/activate"
+UV_BIN="${UV_BIN:-uv}"
 if [[ -n "${VENV_ACTIVATE:-}" ]]; then
     VENV_ACTIVATE="$VENV_ACTIVATE"
 elif [[ -f "$DEFAULT_VENV_ACTIVATE" ]]; then
@@ -32,8 +36,10 @@ else
 fi
 ENTRYPOINT="${ENTRYPOINT:-jobs/demo_job.py}"
 ENTRYPOINT_ARGS="${ENTRYPOINT_ARGS:-}"
+ENTRYPOINT_CMD="${ENTRYPOINT_CMD:-}"
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
+RAY_LOG_ARCHIVE_DIR="${RAY_LOG_ARCHIVE_DIR:-$SLURM_LOG_BASE_DIR/logs/ray-slurm/$SLURM_JOB_ID}"
 HEAD_STARTUP_WAIT_SECONDS="${HEAD_STARTUP_WAIT_SECONDS:-30}"
 WORKER_STARTUP_WAIT_SECONDS="${WORKER_STARTUP_WAIT_SECONDS:-10}"
 CLUSTER_STABILIZE_WAIT_SECONDS="${CLUSTER_STABILIZE_WAIT_SECONDS:-10}"
@@ -42,27 +48,61 @@ if [[ "$VENV_ACTIVATE" != /* ]]; then
     VENV_ACTIVATE="$PROJECT_ROOT/$VENV_ACTIVATE"
 fi
 
-if [[ ! -f "$VENV_ACTIVATE" ]]; then
-    echo "VENV_ACTIVATE not found: $VENV_ACTIVATE"
-    echo "Checked default project venv: $DEFAULT_VENV_ACTIVATE"
-    echo "Set VENV_ACTIVATE=/path/to/.venv/bin/activate (or .venv/bin/activate relative to PROJECT_ROOT)."
-    exit 1
-fi
-
 if [[ ! -d "$PROJECT_ROOT" ]]; then
     echo "PROJECT_ROOT not found: $PROJECT_ROOT"
     exit 1
 fi
 
-if [[ "$ENTRYPOINT" = /* ]]; then
-    ENTRYPOINT_PATH="$ENTRYPOINT"
-else
-    ENTRYPOINT_PATH="$PROJECT_ROOT/$ENTRYPOINT"
+if ! command -v "$UV_BIN" >/dev/null 2>&1; then
+    echo "uv not found (UV_BIN=$UV_BIN)."
+    echo "Install uv on compute nodes or set UV_BIN to the uv binary path."
+    exit 127
 fi
 
-if [[ ! -f "$ENTRYPOINT_PATH" ]]; then
-    echo "ENTRYPOINT not found: $ENTRYPOINT_PATH"
+if [[ ! -f "$VENV_ACTIVATE" ]]; then
+    if [[ ! -f "$PROJECT_ROOT/pyproject.toml" ]]; then
+        echo "pyproject.toml not found in PROJECT_ROOT: $PROJECT_ROOT"
+        echo "Make sure pyproject.toml is synced to the remote project directory."
+        exit 1
+    fi
+    if [[ "$VENV_ACTIVATE" != */bin/activate ]]; then
+        echo "VENV_ACTIVATE must end with /bin/activate: $VENV_ACTIVATE"
+        exit 1
+    fi
+
+    VENV_DIR="${VENV_ACTIVATE%/bin/activate}"
+    echo "Creating virtualenv with uv at: $VENV_DIR"
+    "$UV_BIN" venv "$VENV_DIR"
+
+    if [[ -f "$PROJECT_ROOT/uv.lock" ]]; then
+        echo "Syncing dependencies with uv (frozen lockfile)"
+        (cd "$PROJECT_ROOT" && UV_PROJECT_ENVIRONMENT="$VENV_DIR" "$UV_BIN" sync --frozen)
+    else
+        echo "Syncing dependencies with uv (no lockfile)"
+        (cd "$PROJECT_ROOT" && UV_PROJECT_ENVIRONMENT="$VENV_DIR" "$UV_BIN" sync)
+    fi
+fi
+
+if [[ ! -f "$VENV_ACTIVATE" ]]; then
+    echo "VENV_ACTIVATE not found after bootstrap: $VENV_ACTIVATE"
     exit 1
+fi
+
+if [[ "$RAY_LOG_ARCHIVE_DIR" != /* ]]; then
+    RAY_LOG_ARCHIVE_DIR="$SLURM_LOG_BASE_DIR/$RAY_LOG_ARCHIVE_DIR"
+fi
+
+if [[ -z "$ENTRYPOINT_CMD" ]]; then
+    if [[ "$ENTRYPOINT" = /* ]]; then
+        ENTRYPOINT_PATH="$ENTRYPOINT"
+    else
+        ENTRYPOINT_PATH="$PROJECT_ROOT/$ENTRYPOINT"
+    fi
+
+    if [[ ! -f "$ENTRYPOINT_PATH" ]]; then
+        echo "ENTRYPOINT not found: $ENTRYPOINT_PATH"
+        exit 1
+    fi
 fi
 
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
@@ -82,6 +122,19 @@ echo "Head IP: $head_ip"
 declare -a worker_srun_pids=()
 
 cleanup() {
+    if mkdir -p "$RAY_LOG_ARCHIVE_DIR" >/dev/null 2>&1; then
+        echo "Collecting Ray worker logs into: $RAY_LOG_ARCHIVE_DIR"
+        for node in "${nodes_array[@]}"; do
+            node_log_dir="$RAY_LOG_ARCHIVE_DIR/$node"
+            srun --nodes=1 --ntasks=1 -w "$node" env NODE_LOG_DIR="$node_log_dir" \
+                bash -lc 'mkdir -p "$NODE_LOG_DIR"; if [[ -d /tmp/ray/session_latest/logs ]]; then cp -a /tmp/ray/session_latest/logs/. "$NODE_LOG_DIR"/; else echo "Ray logs not found on node." > "$NODE_LOG_DIR"/NO_LOGS.txt; fi' \
+                >/dev/null 2>&1 || true
+        done
+    else
+        echo "Warning: could not create log archive dir: $RAY_LOG_ARCHIVE_DIR"
+        echo "Skipping Ray worker log collection."
+    fi
+
     echo "Stopping Ray processes"
     for node in "${nodes_array[@]}"; do
         srun --nodes=1 --ntasks=1 -w "$node" \
@@ -117,7 +170,14 @@ done
 
 sleep "$CLUSTER_STABILIZE_WAIT_SECONDS"
 
-# Run requested script on the head node.
-echo "Running entrypoint: $ENTRYPOINT_PATH $ENTRYPOINT_ARGS"
-srun --nodes=1 --ntasks=1 -w "$head_node" \
-    bash -lc "source \"$VENV_ACTIVATE\" && cd \"$PROJECT_ROOT\" && python \"$ENTRYPOINT_PATH\" $ENTRYPOINT_ARGS"
+# Run requested entrypoint on the head node.
+if [[ -n "$ENTRYPOINT_CMD" ]]; then
+    echo "Running entrypoint command with uv run: $ENTRYPOINT_CMD"
+    srun --nodes=1 --ntasks=1 -w "$head_node" \
+        env VENV_ACTIVATE="$VENV_ACTIVATE" PROJECT_ROOT="$PROJECT_ROOT" UV_BIN="$UV_BIN" ENTRYPOINT_CMD="$ENTRYPOINT_CMD" \
+        bash -lc 'source "$VENV_ACTIVATE" && cd "$PROJECT_ROOT" && "$UV_BIN" run bash -lc "$ENTRYPOINT_CMD"'
+else
+    echo "Running entrypoint with uv run: $ENTRYPOINT_PATH $ENTRYPOINT_ARGS"
+    srun --nodes=1 --ntasks=1 -w "$head_node" \
+        bash -lc "source \"$VENV_ACTIVATE\" && cd \"$PROJECT_ROOT\" && \"$UV_BIN\" run \"$ENTRYPOINT_PATH\" $ENTRYPOINT_ARGS"
+fi

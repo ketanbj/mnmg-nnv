@@ -65,45 +65,33 @@ Allocate/start Slurm job:
 make slurm up
 ```
 
-Submit a different script:
+Configure Slurm runtime in `.env` (for example `PROJECT_ROOT`, `ENTRYPOINT`, `ENTRYPOINT_ARGS`, `ENTRYPOINT_CMD`, `SLURM_JOB_NAME`) and submit:
 
 ```bash
-make slurm up ENTRYPOINT=jobs/pipeline_job.py
-```
-
-Override environment/script settings at submission time:
-
-```bash
-make slurm up \
-  VENV_ACTIVATE=.venv/bin/activate \
-  PROJECT_ROOT=$PWD \
-  ENTRYPOINT=jobs/demo_job.py \
-  ENTRYPOINT_ARGS="--count 20"
+make slurm up
 ```
 
 `VENV_ACTIVATE` may be absolute or relative to `PROJECT_ROOT` (for SSH sync flow, `.venv/bin/activate` is usually easiest).
+`make slurm ...` no longer accepts command-line variable overrides; set all values in `.env`.
 
-Queue and cancellation:
+Stop job:
 
 ```bash
-make slurm queue
 make slurm down
-make slurm down JOBID=123456
 ```
 
-`scripts/slurm/ray_cluster.sbatch` starts Ray head on the first allocated node, starts workers on remaining nodes, runs the requested Python entrypoint on the head node, and stops Ray processes on exit.
+`scripts/slurm/ray_cluster.sbatch` starts Ray head on the first allocated node, starts workers on remaining nodes, runs either `uv run <ENTRYPOINT_CMD>` (if set) or `uv run ENTRYPOINT ENTRYPOINT_ARGS` on the head node, and stops Ray processes on exit.
 
 `make slurm up` stores the submitted job id in `.slurm-ray-jobid`; `make slurm down` uses that file by default.
 
 If Slurm CLI is only available on a login node, run through SSH:
 
 ```bash
-make slurm up SLURM_LOGIN=user@login.cluster.edu SLURM_REMOTE_DIR=/path/to/repo
-make slurm queue SLURM_LOGIN=user@login.cluster.edu SLURM_REMOTE_DIR=/path/to/repo
-make slurm down SLURM_LOGIN=user@login.cluster.edu SLURM_REMOTE_DIR=/path/to/repo
+make slurm up
+make slurm down
 ```
 
-You can also set `SLURM_LOGIN` and `SLURM_REMOTE_DIR` in `.env` and run `make slurm up/down/queue` without repeating them.
+Set `SLURM_LOGIN` and `SLURM_REMOTE_DIR` in `.env` for SSH mode.
 
 If you use an SSH alias, add a host entry in `~/.ssh/config`:
 
@@ -117,19 +105,24 @@ Host phoenix
 Then set `SLURM_LOGIN=phoenix` in `.env`.
 
 When `SLURM_LOGIN` is set, `make slurm ...` now auto-syncs required project files to `SLURM_REMOTE_DIR` via `scp` before running remote commands. The default sync list is:
-`Makefile README.md pyproject.toml uv.lock jobs scripts .env .env.example`
+`Makefile scripts/slurm/ray_cluster.sbatch .env`
 
-You can disable syncing or customize the file list:
+You can disable syncing or customize the file list by updating `.env`:
 
 ```bash
-make slurm up SLURM_SYNC=0
-make slurm up SLURM_SYNC_FILES="Makefile scripts jobs"
+SLURM_SYNC=0
+SLURM_SYNC_FILES=Makefile scripts/slurm/ray_cluster.sbatch jobs/pipeline_job.py .env
 ```
+
+If `VENV_ACTIVATE` does not exist on the compute nodes, `scripts/slurm/ray_cluster.sbatch` now bootstraps it with `uv` from `pyproject.toml` (using `uv.lock` when present) before sourcing the venv.
+
+At teardown, worker Ray logs are collected into one job folder on shared storage:
+`<SLURM_REMOTE_DIR>/logs/ray-slurm/<slurm_job_id>/<node>/...` by default
+(override with `RAY_LOG_ARCHIVE_DIR`).
 
 If `SLURM_LOGIN` is set and `SLURM_REMOTE_DIR` is left empty, it defaults to the repo folder name under your remote home directory (for example `mnmg-nnv`).
 
 ## Notes
 
 - For cluster-connected scripts, use `ray.init(address="auto")`.
-- For Docker mode, the script must be executable by Python in the Ray image.
-- `make slurm ...` commands require Slurm CLI tools (`sbatch`, `squeue`, `scancel`) in `PATH` and should be run on your HPC Slurm login node.
+- `make slurm ...` commands require Slurm CLI tools (`sbatch`, `scancel`) in `PATH` and should be run on your HPC Slurm login node.
